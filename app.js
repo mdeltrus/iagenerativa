@@ -154,7 +154,7 @@ async function sendMessage() {
 
 // ─── Gemini REST API ───────────────────────────────────────────
 async function callGeminiAPI(userText) {
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  const endpoint = `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${apiKey}`;
 
   // Build contents array (keep last 20 turns for context)
   const recentHistory = chatHistory.slice(-20);
