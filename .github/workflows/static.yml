@@ -41,7 +41,7 @@ jobs:
         env:
           IA_API_KEY: ${{ secrets.IA_API_KEY }}
         run: |
-          sed -i "s|__IA_API_KEY__|${IA_API_KEY}|g" chatbot/app.js
+          sed -i "s|__IA_API_KEY__|${IA_API_KEY}|g" app.js
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
