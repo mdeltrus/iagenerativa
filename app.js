@@ -160,7 +160,7 @@ async function callGeminiAPI(userText) {
   const recentHistory = chatHistory.slice(-20);
 
   const body = {
-    system_instruction: {
+    contents: {
       parts: [{ text: SYSTEM_PROMPT }]
     },
     contents: recentHistory,
