@@ -7,7 +7,7 @@
 
 // ─── State ────────────────────────────────────────────────────
 let apiKey        = localStorage.getItem('recruit_ai_key') || '';
-let model         = 'gemini-2.0-flash';
+let model         = 'gemini-2.5-flash';
 let chatHistory   = [];          // { role:'user'|'model', parts:[{text}] }
 let sessionHistory = [];         // [{id, title, history}] for sidebar
 let isLoading     = false;
