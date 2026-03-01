@@ -1,6 +1,6 @@
 /* ============================================================
    RecruitAI — App Logic
-   Google Generative AI (Gemini) REST API Integration
+   Google Generative AI (Gemini) REST API + File Upload
    ============================================================ */
 
 'use strict';
@@ -13,16 +13,19 @@ let apiKey = (_INJECTED_KEY && !_INJECTED_KEY.startsWith('__'))
     ? _INJECTED_KEY
     : (localStorage.getItem('recruit_ai_key') || '');
 let model = 'gemini-2.5-flash';
-let chatHistory = [];          // { role:'user'|'model', parts:[{text}] }
-let sessionHistory = [];         // [{id, title, history}] for sidebar
+let chatHistory = [];         // { role:'user'|'model', parts:[...] }
+let sessionHistory = [];        // [{id, title, history}]
 let isLoading = false;
 let currentSessionId = null;
+let attachedFile = null;       // { name, type:'pdf'|'docx'|'odt'|'doc', base64?, text?, mimeType? }
 
-const SYSTEM_PROMPT = `Eres RecruitAI, un asistente experto en reclutamiento y gestión de talento humano. 
-Tu especialidad incluye: análisis de CVs, creación de descripciones de puestos, generación de preguntas de entrevista, 
-evaluación de competencias, tendencias del mercado laboral y mejores prácticas de RRHH. 
-Responde siempre de forma profesional, estructurada y en el idioma en que el usuario te escribe. 
-Usa formato Markdown cuando sea útil (listas, tablas, encabezados). 
+const SYSTEM_PROMPT = `Eres RecruitAI, un asistente experto en reclutamiento y gestión de talento humano.
+Tu especialidad incluye: análisis de CVs, creación de descripciones de puestos, generación de preguntas de entrevista,
+evaluación de competencias, tendencias del mercado laboral y mejores prácticas de RRHH.
+Cuando el usuario adjunte un CV o documento, analízalo con detalle: extrae datos clave, evalúa experiencia,
+habilidades y formación, e indica fortalezas y áreas de mejora.
+Responde siempre de forma profesional, estructurada y en el idioma en que el usuario te escribe.
+Usa formato Markdown cuando sea útil (listas, tablas, encabezados).
 Si no tienes suficiente información para dar una respuesta precisa, pídela amablemente.`;
 
 // ─── DOM References ────────────────────────────────────────────
@@ -41,6 +44,16 @@ const charCount = document.getElementById('char-count');
 const toast = document.getElementById('toast');
 const promptChips = document.querySelectorAll('.prompt-chip');
 const canvas = document.getElementById('particles-canvas');
+// File upload
+const fileInput = document.getElementById('file-input');
+const attachBtn = document.getElementById('attach-btn');
+const fileChipRow = document.getElementById('file-chip-row');
+const fileChipEl = document.getElementById('file-chip');
+const fileChipName = document.getElementById('file-chip-name');
+const fileChipSize = document.getElementById('file-chip-size');
+const fileChipIcon = document.getElementById('file-chip-icon');
+const fileChipRemove = document.getElementById('file-chip-remove');
+const dropOverlay = document.getElementById('drop-overlay');
 
 // ─── Init ──────────────────────────────────────────────────────
 (function init() {
@@ -54,7 +67,7 @@ const canvas = document.getElementById('particles-canvas');
         userInput.style.height = Math.min(userInput.scrollHeight, 200) + 'px';
         const len = userInput.value.length;
         charCount.textContent = len;
-        sendBtn.disabled = len === 0 || isLoading;
+        sendBtn.disabled = (len === 0 && !attachedFile) || isLoading;
     });
 
     // Send on Enter (Shift+Enter = newline)
@@ -70,6 +83,24 @@ const canvas = document.getElementById('particles-canvas');
     clearChatBtn.addEventListener('click', clearChat);
     sidebarToggle.addEventListener('click', toggleSidebar);
 
+    // ─ File upload ─
+    attachBtn.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', e => {
+        if (e.target.files[0]) handleFileSelect(e.target.files[0]);
+        fileInput.value = '';
+    });
+    fileChipRemove.addEventListener('click', clearFile);
+
+    // Drag & Drop
+    document.addEventListener('dragover', e => { e.preventDefault(); dropOverlay.classList.add('active'); });
+    document.addEventListener('dragleave', e => { if (!e.relatedTarget) dropOverlay.classList.remove('active'); });
+    document.addEventListener('drop', e => {
+        e.preventDefault();
+        dropOverlay.classList.remove('active');
+        const file = e.dataTransfer.files?.[0];
+        if (file) handleFileSelect(file);
+    });
+
     promptChips.forEach(chip => {
         chip.addEventListener('click', () => {
             userInput.value = chip.dataset.prompt;
@@ -79,8 +110,7 @@ const canvas = document.getElementById('particles-canvas');
     });
 })();
 
-// ─── API Key (solo para desarrollo local) ─────────────────────
-// En producción (GitHub Pages) la key es inyectada en build-time.
+// ─── API Key (solo desarrollo local) ───────────────────────────
 function saveApiKey(key) {
     if (!key) { showToast('Ingresa una API Key válida', 'error'); return; }
     apiKey = key;
@@ -96,40 +126,172 @@ function setStatus(state) {
     statusText.textContent = labels[state] || 'Sin conexión';
 }
 
+// ─── File Upload ───────────────────────────────────────────────
+const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
+const FILE_ICONS = { pdf: '📕', docx: '📄', doc: '📄', odt: '📝', ott: '📝' };
+
+async function handleFileSelect(file) {
+    const ext = file.name.split('.').pop().toLowerCase();
+    if (!['pdf', 'doc', 'docx', 'odt', 'ott'].includes(ext)) {
+        showToast(`Formato no soportado: .${ext}. Usa PDF, DOCX, ODT o DOC.`, 'error');
+        return;
+    }
+    if (file.size > MAX_FILE_BYTES) {
+        showToast('Archivo demasiado grande (máx. 10 MB).', 'error');
+        return;
+    }
+    setFileChip(file.name, formatFileSize(file.size), FILE_ICONS[ext] || '📄', true);
+    try {
+        await processFile(file, ext);
+        setFileChip(file.name, formatFileSize(file.size), FILE_ICONS[ext] || '📄', false);
+        attachBtn.classList.add('has-file');
+        sendBtn.disabled = isLoading;
+        showToast(`Archivo listo: ${file.name}`, 'success');
+    } catch (err) {
+        clearFile();
+        showToast(`Error procesando archivo: ${err.message}`, 'error');
+    }
+}
+
+async function processFile(file, ext) {
+    const arrayBuffer = await file.arrayBuffer();
+    if (ext === 'pdf') {
+        attachedFile = {
+            name: file.name,
+            type: 'pdf',
+            mimeType: 'application/pdf',
+            base64: arrayBufferToBase64(arrayBuffer)
+        };
+    } else if (ext === 'docx') {
+        if (typeof mammoth === 'undefined') throw new Error('mammoth.js no cargó. Verifica tu conexión a internet.');
+        const result = await mammoth.extractRawText({ arrayBuffer });
+        if (!result.value) throw new Error('No se pudo extraer texto del DOCX.');
+        attachedFile = { name: file.name, type: 'docx', text: result.value };
+    } else if (ext === 'odt' || ext === 'ott') {
+        if (typeof JSZip === 'undefined') throw new Error('JSZip no cargó. Verifica tu conexión a internet.');
+        const text = await extractOdtText(arrayBuffer);
+        if (!text) throw new Error('No se pudo extraer texto del ODT.');
+        attachedFile = { name: file.name, type: 'odt', text };
+    } else {
+        // .doc legacy binary — best-effort text extraction
+        const text = extractDocText(arrayBuffer);
+        if (!text) throw new Error('Archivo .doc sin texto legible. Conviértelo a DOCX o PDF para mejores resultados.');
+        attachedFile = { name: file.name, type: 'doc', text };
+    }
+}
+
+async function extractOdtText(arrayBuffer) {
+    const zip = await JSZip.loadAsync(arrayBuffer);
+    const contentFile = zip.file('content.xml');
+    if (!contentFile) throw new Error('Archivo ODT inválido (sin content.xml).');
+    const xml = await contentFile.async('text');
+    return xml
+        .replace(/<text:line-break[^>]*\/>/g, '\n')
+        .replace(/<text:p[^>]*>/g, '\n')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+        .replace(/&apos;/g, "'").replace(/&quot;/g, '"')
+        .replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function extractDocText(arrayBuffer) {
+    const bytes = new Uint8Array(arrayBuffer);
+    let text = '';
+    for (let i = 0; i < bytes.length; i++) {
+        const b = bytes[i];
+        if ((b >= 32 && b < 127) || b === 10 || b === 13) text += String.fromCharCode(b);
+    }
+    return text.replace(/[^ -~\n\r]+/g, ' ').replace(/ {3,}/g, '  ').trim();
+}
+
+function arrayBufferToBase64(buffer) {
+    let bin = '';
+    const bytes = new Uint8Array(buffer);
+    for (let i = 0; i < bytes.byteLength; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
+}
+
+function formatFileSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / 1048576).toFixed(1) + ' MB';
+}
+
+function setFileChip(name, size, icon, processing) {
+    fileChipIcon.textContent = icon;
+    fileChipName.textContent = name;
+    fileChipSize.textContent = size;
+    fileChipEl.classList.toggle('processing', processing);
+    fileChipRow.style.display = '';
+}
+
+function clearFile() {
+    attachedFile = null;
+    fileChipRow.style.display = 'none';
+    fileChipEl.classList.remove('processing');
+    attachBtn.classList.remove('has-file');
+    sendBtn.disabled = userInput.value.trim().length === 0 || isLoading;
+}
+
 // ─── Send Message ──────────────────────────────────────────────
 async function sendMessage() {
     const text = userInput.value.trim();
-    if (!text || isLoading) return;
+    if (!text && !attachedFile) return;
+    if (isLoading) return;
 
     if (!apiKey) {
         showToast('Por favor ingresa tu Google AI API Key en el panel izquierdo', 'error');
         return;
     }
 
-    // Hide welcome screen
     if (welcomeScreen) welcomeScreen.style.display = 'none';
 
-    // Render user bubble
-    appendMessage('user', text);
-    chatHistory.push({ role: 'user', parts: [{ text }] });
+    // Snapshot file before clearing
+    const currentFile = attachedFile;
 
-    // Clear input
+    // Build multipart message for Gemini
+    const currentParts = [];
+    if (currentFile && currentFile.type === 'pdf') {
+        // PDF goes as inline binary data — Gemini reads it natively
+        currentParts.push({
+            inline_data: { mime_type: currentFile.mimeType, data: currentFile.base64 }
+        });
+    }
+    // Build the text part (embed extracted text for non-PDF docs)
+    let msgText;
+    if (text && currentFile && currentFile.type !== 'pdf') {
+        msgText = `${text}\n\n---\n**Documento adjunto:** ${currentFile.name}\n\n${currentFile.text}`;
+    } else if (!text && currentFile && currentFile.type !== 'pdf') {
+        msgText = `Analiza el siguiente documento y proporciona un resumen profesional de su contenido.\n\n**Documento:** ${currentFile.name}\n\n${currentFile.text}`;
+    } else if (!text && currentFile && currentFile.type === 'pdf') {
+        msgText = 'Analiza el documento PDF adjunto y proporciona un resumen profesional de su contenido.';
+    } else {
+        msgText = text;
+    }
+    currentParts.push({ text: msgText });
+
+    // Display text for user bubble
+    const fileLabel = currentFile ? ` 📎 *${currentFile.name}*` : '';
+    const displayBubble = text ? text + fileLabel : `📎 ${currentFile.name}`;
+    appendMessage('user', displayBubble);
+    chatHistory.push({ role: 'user', parts: currentParts });
+
+    // Reset input & file
     userInput.value = '';
     userInput.style.height = 'auto';
     charCount.textContent = '0';
+    clearFile();
     sendBtn.disabled = true;
     isLoading = true;
     setStatus('loading');
 
-    // Show typing indicator
     const typingEl = appendTypingIndicator();
-
     try {
-        const response = await callGeminiAPI(text);
+        const response = await callGeminiAPI();
         typingEl.remove();
         appendMessage('model', response);
         chatHistory.push({ role: 'model', parts: [{ text: response }] });
-        saveCurrentSession(text);
+        saveCurrentSession(text || (currentFile ? currentFile.name : ''));
         setStatus('online');
     } catch (err) {
         typingEl.remove();
@@ -138,23 +300,19 @@ async function sendMessage() {
         setStatus('online');
         showToast(errMsg, 'error');
     }
-
     isLoading = false;
-    sendBtn.disabled = userInput.value.trim().length === 0;
+    sendBtn.disabled = userInput.value.trim().length === 0 && !attachedFile;
     chatArea.scrollTop = chatArea.scrollHeight;
 }
 
 // ─── Gemini REST API ───────────────────────────────────────────
-async function callGeminiAPI(userText) {
-    const endpoint = `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${apiKey}`;
-
-    // Build contents array (keep last 20 turns for context)
+// chatHistory already contains the current user turn at call time
+async function callGeminiAPI() {
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
     const recentHistory = chatHistory.slice(-20);
 
     const body = {
-        contents: {
-            parts: [{ text: SYSTEM_PROMPT }]
-        },
+        system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
         contents: recentHistory,
         generationConfig: {
             temperature: 0.8,
@@ -184,10 +342,8 @@ async function callGeminiAPI(userText) {
 
     const data = await res.json();
     const candidate = data?.candidates?.[0];
-
     if (!candidate) throw new Error('Sin respuesta del modelo.');
     if (candidate.finishReason === 'SAFETY') throw new Error('Respuesta bloqueada por filtros de seguridad.');
-
     return candidate.content?.parts?.[0]?.text || 'Sin contenido en la respuesta.';
 }
 
@@ -226,7 +382,6 @@ function appendMessage(role, text, isError = false) {
     contentDiv.appendChild(meta);
     wrapper.appendChild(avatar);
     wrapper.appendChild(contentDiv);
-
     chatArea.appendChild(wrapper);
     chatArea.scrollTop = chatArea.scrollHeight;
     return wrapper;
@@ -254,38 +409,25 @@ function appendTypingIndicator() {
 // ─── Markdown Renderer ─────────────────────────────────────────
 function renderMarkdown(text) {
     let html = escapeHtml(text);
-
-    // Code blocks (before inline)
     html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) =>
         `<pre><code class="lang-${lang}">${code.trim()}</code></pre>`);
-    // Inline code
     html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-    // Headers
     html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
     html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
     html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
-    // Bold & italic
     html = html.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
     html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
     html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-    // Horizontal rule
     html = html.replace(/^---$/gm, '<hr>');
-    // Blockquote
     html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
-    // Tables
     html = renderTable(html);
-    // Unordered lists
     html = html.replace(/^[\-\*] (.+)$/gm, '<li>$1</li>');
     html = html.replace(/(<li>[\s\S]+?<\/li>)(?!\s*<li>)/g, '<ul>$1</ul>');
-    // Ordered lists
     html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
-    // Paragraphs
     html = html.replace(/\n\n+/g, '</p><p>');
     html = html.replace(/\n/g, '<br>');
     html = `<p>${html}</p>`;
-    // Clean empty <p>
     html = html.replace(/<p>\s*<\/p>/g, '');
-
     return html;
 }
 
@@ -311,8 +453,8 @@ function escapeHtml(text) {
 }
 
 // ─── Session History ───────────────────────────────────────────
-function saveCurrentSession(firstUserMsg) {
-    const title = firstUserMsg.substring(0, 40) + (firstUserMsg.length > 40 ? '…' : '');
+function saveCurrentSession(firstMsg) {
+    const title = firstMsg.substring(0, 40) + (firstMsg.length > 40 ? '…' : '');
     if (!currentSessionId) {
         currentSessionId = Date.now().toString();
         sessionHistory.unshift({ id: currentSessionId, title, history: [...chatHistory] });
@@ -348,27 +490,27 @@ function loadSession(session) {
     if (welcomeScreen) welcomeScreen.style.display = 'none';
     currentSessionId = session.id;
     chatHistory = [...session.history];
-    // Re-render messages
-    chatHistory.forEach(msg => appendMessage(msg.role, msg.parts[0].text));
+    chatHistory.forEach(msg => appendMessage(msg.role, msg.parts.find(p => p.text)?.text || ''));
 }
 
 function startNewChat() {
     clearChatDOM();
     chatHistory = [];
     currentSessionId = null;
+    clearFile();
     if (welcomeScreen) welcomeScreen.style.display = '';
 }
 
 function clearChat() {
     clearChatDOM();
     chatHistory = [];
+    clearFile();
     if (welcomeScreen) welcomeScreen.style.display = '';
     showToast('Conversación limpiada', 'info');
 }
 
 function clearChatDOM() {
-    const messages = chatArea.querySelectorAll('.message');
-    messages.forEach(m => m.remove());
+    chatArea.querySelectorAll('.message').forEach(m => m.remove());
 }
 
 // ─── Sidebar Toggle ────────────────────────────────────────────
