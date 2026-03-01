@@ -31,13 +31,27 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # ── Inyectar API Key desde el secret de GitHub ─────────────
+      # Reemplaza el placeholder __IA_API_KEY__ en app.js con el
+      # valor real del secret antes de subir el artefacto.
+      # El secret se llama IA_API_KEY y debe estar configurado en:
+      # Settings → Secrets and variables → Actions → New repository secret
+      - name: Inject API Key into app.js
+        env:
+          IA_API_KEY: ${{ secrets.IA_API_KEY }}
+        run: |
+          sed -i "s|__IA_API_KEY__|${IA_API_KEY}|g" chatbot/app.js
+
       - name: Setup Pages
         uses: actions/configure-pages@v5
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          # Upload entire repository
-          path: '.'
+          # Sube la carpeta chatbot (donde está index.html)
+          path: 'chatbot'
+
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
