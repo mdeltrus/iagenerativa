@@ -17,16 +17,16 @@ let chatHistory = [];         // { role:'user'|'model', parts:[...] }
 let sessionHistory = [];        // [{id, title, history}]
 let isLoading = false;
 let currentSessionId = null;
-let attachedFile = null;       // { name, type:'pdf'|'docx'|'odt'|'doc', base64?, text?, mimeType? }
+let attachedFiles = [];        // [{ name, type, base64?, text?, mimeType?, category: 'cv'|'profile' }]
 
 const SYSTEM_PROMPT = `Eres RecruitAI, un asistente experto en reclutamiento y gestión de talento humano.
 Tu especialidad incluye: análisis de CVs, creación de descripciones de puestos, generación de preguntas de entrevista,
-evaluación de competencias, tendencias del mercado laboral y mejores prácticas de RRHH.
-Cuando el usuario adjunte un CV o documento, analízalo con detalle: extrae datos clave, evalúa experiencia,
-habilidades y formación, e indica fortalezas y áreas de mejora.
+evaluación de competencias, comparación de candidatos y mejores prácticas de RRHH.
+Cuando el usuario proporcione un "Perfil de Puesto" y uno o más "CVs", tu objetivo principal es identificar qué candidato(s) encajan mejor.
+Evalúa experiencia, habilidades y formación, e indica fortalezas y áreas de mejora para cada uno.
+Proporciona un ranking si hay varios candidatos.
 Responde siempre de forma profesional, estructurada y en el idioma en que el usuario te escribe.
-Usa formato Markdown cuando sea útil (listas, tablas, encabezados).
-Si no tienes suficiente información para dar una respuesta precisa, pídela amablemente.`;
+Usa formato Markdown cuando sea útil (listas, tablas, encabezados).`;
 
 // ─── DOM References ────────────────────────────────────────────
 const chatArea = document.getElementById('chat-area');
@@ -47,12 +47,7 @@ const canvas = document.getElementById('particles-canvas');
 // File upload
 const fileInput = document.getElementById('file-input');
 const attachBtn = document.getElementById('attach-btn');
-const fileChipRow = document.getElementById('file-chip-row');
-const fileChipEl = document.getElementById('file-chip');
-const fileChipName = document.getElementById('file-chip-name');
-const fileChipSize = document.getElementById('file-chip-size');
-const fileChipIcon = document.getElementById('file-chip-icon');
-const fileChipRemove = document.getElementById('file-chip-remove');
+const fileChipContainer = document.getElementById('file-chip-container');
 const dropOverlay = document.getElementById('drop-overlay');
 
 // ─── Init ──────────────────────────────────────────────────────
@@ -67,7 +62,7 @@ const dropOverlay = document.getElementById('drop-overlay');
         userInput.style.height = Math.min(userInput.scrollHeight, 200) + 'px';
         const len = userInput.value.length;
         charCount.textContent = len;
-        sendBtn.disabled = (len === 0 && !attachedFile) || isLoading;
+        sendBtn.disabled = (len === 0 && attachedFiles.length === 0) || isLoading;
     });
 
     // Send on Enter (Shift+Enter = newline)
@@ -86,10 +81,9 @@ const dropOverlay = document.getElementById('drop-overlay');
     // ─ File upload ─
     attachBtn.addEventListener('click', () => fileInput.click());
     fileInput.addEventListener('change', e => {
-        if (e.target.files[0]) handleFileSelect(e.target.files[0]);
+        if (e.target.files.length > 0) handleFilesSelect(Array.from(e.target.files));
         fileInput.value = '';
     });
-    fileChipRemove.addEventListener('click', clearFile);
 
     // Drag & Drop
     document.addEventListener('dragover', e => { e.preventDefault(); dropOverlay.classList.add('active'); });
@@ -97,8 +91,8 @@ const dropOverlay = document.getElementById('drop-overlay');
     document.addEventListener('drop', e => {
         e.preventDefault();
         dropOverlay.classList.remove('active');
-        const file = e.dataTransfer.files?.[0];
-        if (file) handleFileSelect(file);
+        const files = Array.from(e.dataTransfer.files || []);
+        if (files.length > 0) handleFilesSelect(files);
     });
 
     promptChips.forEach(chip => {
@@ -130,53 +124,63 @@ function setStatus(state) {
 const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
 const FILE_ICONS = { pdf: '📕', docx: '📄', doc: '📄', odt: '📝', ott: '📝' };
 
-async function handleFileSelect(file) {
-    const ext = file.name.split('.').pop().toLowerCase();
-    if (!['pdf', 'doc', 'docx', 'odt', 'ott'].includes(ext)) {
-        showToast(`Formato no soportado: .${ext}. Usa PDF, DOCX, ODT o DOC.`, 'error');
-        return;
+async function handleFilesSelect(files) {
+    const validExts = ['pdf', 'doc', 'docx', 'odt', 'ott'];
+    let count = 0;
+
+    for (const file of files) {
+        const ext = file.name.split('.').pop().toLowerCase();
+        if (!validExts.includes(ext)) {
+            showToast(`Formato no soportado: .${ext}`, 'error');
+            continue;
+        }
+        if (file.size > MAX_FILE_BYTES) {
+            showToast(`"${file.name}" excede 10 MB.`, 'error');
+            continue;
+        }
+
+        // Add placeholder while processing
+        const fileId = Date.now() + Math.random();
+        const fileObj = { id: fileId, name: file.name, size: file.size, ext, processing: true, category: 'cv' };
+        attachedFiles.push(fileObj);
+        renderFileChips();
+
+        try {
+            await processFile(file, ext, fileObj);
+            fileObj.processing = false;
+        } catch (err) {
+            attachedFiles = attachedFiles.filter(f => f.id !== fileId);
+            showToast(`Error: ${err.message}`, 'error');
+        }
+        renderFileChips();
+        count++;
     }
-    if (file.size > MAX_FILE_BYTES) {
-        showToast('Archivo demasiado grande (máx. 10 MB).', 'error');
-        return;
-    }
-    setFileChip(file.name, formatFileSize(file.size), FILE_ICONS[ext] || '📄', true);
-    try {
-        await processFile(file, ext);
-        setFileChip(file.name, formatFileSize(file.size), FILE_ICONS[ext] || '📄', false);
+
+    if (count > 0) {
         attachBtn.classList.add('has-file');
         sendBtn.disabled = isLoading;
-        showToast(`Archivo listo: ${file.name}`, 'success');
-    } catch (err) {
-        clearFile();
-        showToast(`Error procesando archivo: ${err.message}`, 'error');
     }
 }
 
-async function processFile(file, ext) {
+async function processFile(file, ext, fileObj) {
     const arrayBuffer = await file.arrayBuffer();
     if (ext === 'pdf') {
-        attachedFile = {
-            name: file.name,
-            type: 'pdf',
-            mimeType: 'application/pdf',
-            base64: arrayBufferToBase64(arrayBuffer)
-        };
+        fileObj.type = 'pdf';
+        fileObj.mimeType = 'application/pdf';
+        fileObj.base64 = arrayBufferToBase64(arrayBuffer);
     } else if (ext === 'docx') {
-        if (typeof mammoth === 'undefined') throw new Error('mammoth.js no cargó. Verifica tu conexión a internet.');
+        if (typeof mammoth === 'undefined') throw new Error('mammoth.js no cargó.');
         const result = await mammoth.extractRawText({ arrayBuffer });
-        if (!result.value) throw new Error('No se pudo extraer texto del DOCX.');
-        attachedFile = { name: file.name, type: 'docx', text: result.value };
+        fileObj.type = 'docx';
+        fileObj.text = result.value || '';
     } else if (ext === 'odt' || ext === 'ott') {
-        if (typeof JSZip === 'undefined') throw new Error('JSZip no cargó. Verifica tu conexión a internet.');
         const text = await extractOdtText(arrayBuffer);
-        if (!text) throw new Error('No se pudo extraer texto del ODT.');
-        attachedFile = { name: file.name, type: 'odt', text };
+        fileObj.type = 'odt';
+        fileObj.text = text;
     } else {
-        // .doc legacy binary — best-effort text extraction
         const text = extractDocText(arrayBuffer);
-        if (!text) throw new Error('Archivo .doc sin texto legible. Conviértelo a DOCX o PDF para mejores resultados.');
-        attachedFile = { name: file.name, type: 'doc', text };
+        fileObj.type = 'doc';
+        fileObj.text = text;
     }
 }
 
@@ -217,70 +221,135 @@ function formatFileSize(bytes) {
     return (bytes / 1048576).toFixed(1) + ' MB';
 }
 
-function setFileChip(name, size, icon, processing) {
-    fileChipIcon.textContent = icon;
-    fileChipName.textContent = name;
-    fileChipSize.textContent = size;
-    fileChipEl.classList.toggle('processing', processing);
-    fileChipRow.style.display = '';
+function renderFileChips() {
+    fileChipContainer.innerHTML = '';
+    attachedFiles.forEach(file => {
+        const chip = document.createElement('div');
+        chip.className = 'file-chip';
+        if (file.processing) chip.classList.add('processing');
+        chip.dataset.category = file.category;
+
+        const icon = document.createElement('span');
+        icon.className = 'file-chip-icon';
+        icon.textContent = FILE_ICONS[file.ext] || '📄';
+
+        const name = document.createElement('span');
+        name.className = 'file-chip-name';
+        name.textContent = file.name;
+
+        const size = document.createElement('span');
+        size.className = 'file-chip-size';
+        size.textContent = formatFileSize(file.size);
+
+        const toggle = document.createElement('div');
+        toggle.className = 'file-type-toggle';
+        toggle.textContent = file.category === 'profile' ? 'Puesto' : 'CV';
+        toggle.title = 'Cambiar entre Perfil de Puesto y CV';
+        toggle.onclick = () => {
+            file.category = file.category === 'profile' ? 'cv' : 'profile';
+            renderFileChips();
+        };
+
+        const remove = document.createElement('button');
+        remove.className = 'file-chip-remove';
+        remove.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>`;
+        remove.onclick = () => removeFile(file.id);
+
+        chip.appendChild(icon);
+        chip.appendChild(name);
+        chip.appendChild(size);
+        chip.appendChild(toggle);
+        chip.appendChild(remove);
+        fileChipContainer.appendChild(chip);
+    });
+
+    if (attachedFiles.length === 0) {
+        attachBtn.classList.remove('has-file');
+    }
 }
 
-function clearFile() {
-    attachedFile = null;
-    fileChipRow.style.display = 'none';
-    fileChipEl.classList.remove('processing');
-    attachBtn.classList.remove('has-file');
-    sendBtn.disabled = userInput.value.trim().length === 0 || isLoading;
+function removeFile(id) {
+    attachedFiles = attachedFiles.filter(f => f.id !== id);
+    renderFileChips();
+    sendBtn.disabled = userInput.value.trim().length === 0 && attachedFiles.length === 0;
+}
+
+function clearAllFiles() {
+    attachedFiles = [];
+    renderFileChips();
 }
 
 // ─── Send Message ──────────────────────────────────────────────
 async function sendMessage() {
     const text = userInput.value.trim();
-    if (!text && !attachedFile) return;
+    if (!text && attachedFiles.length === 0) return;
     if (isLoading) return;
 
     if (!apiKey) {
-        showToast('Por favor ingresa tu Google AI API Key en el panel izquierdo', 'error');
+        showToast('Por favor ingresa tu API Key', 'error');
         return;
     }
 
     if (welcomeScreen) welcomeScreen.style.display = 'none';
 
-    // Snapshot file before clearing
-    const currentFile = attachedFile;
-
-    // Build multipart message for Gemini
+    // Build parts
+    const currentFiles = [...attachedFiles];
     const currentParts = [];
-    if (currentFile && currentFile.type === 'pdf') {
-        // PDF goes as inline binary data — Gemini reads it natively
-        currentParts.push({
-            inline_data: { mime_type: currentFile.mimeType, data: currentFile.base64 }
-        });
-    }
-    // Build the text part (embed extracted text for non-PDF docs)
-    let msgText;
-    if (text && currentFile && currentFile.type !== 'pdf') {
-        msgText = `${text}\n\n---\n**Documento adjunto:** ${currentFile.name}\n\n${currentFile.text}`;
-    } else if (!text && currentFile && currentFile.type !== 'pdf') {
-        msgText = `Analiza el siguiente documento y proporciona un resumen profesional de su contenido.\n\n**Documento:** ${currentFile.name}\n\n${currentFile.text}`;
-    } else if (!text && currentFile && currentFile.type === 'pdf') {
-        msgText = 'Analiza el documento PDF adjunto y proporciona un resumen profesional de su contenido.';
-    } else {
-        msgText = text;
-    }
-    currentParts.push({ text: msgText });
 
-    // Display text for user bubble
-    const fileLabel = currentFile ? ` 📎 *${currentFile.name}*` : '';
-    const displayBubble = text ? text + fileLabel : `📎 ${currentFile.name}`;
-    appendMessage('user', displayBubble);
+    // Separate files by category
+    const profiles = currentFiles.filter(f => f.category === 'profile');
+    const cvs = currentFiles.filter(f => f.category === 'cv');
+
+    let contextualPrompt = '';
+
+    if (profiles.length > 0) {
+        contextualPrompt += `### PERFIL DE PUESTO:\n`;
+        for (const p of profiles) {
+            contextualPrompt += `Documento: ${p.name}\n`;
+            if (p.type === 'pdf') {
+                currentParts.push({ inline_data: { mime_type: p.mimeType, data: p.base64 } });
+            } else {
+                contextualPrompt += `${p.text}\n`;
+            }
+        }
+    }
+
+    if (cvs.length > 0) {
+        contextualPrompt += `\n### CV(s) PARA EVALUAR:\n`;
+        for (const c of cvs) {
+            contextualPrompt += `Candidato: ${c.name}\n`;
+            if (c.type === 'pdf') {
+                currentParts.push({ inline_data: { mime_type: c.mimeType, data: c.base64 } });
+            } else {
+                contextualPrompt += `${c.text}\n`;
+            }
+        }
+    }
+
+    let finalMsg;
+    if (profiles.length > 0 && cvs.length > 0) {
+        finalMsg = `${text ? text + '\n\n' : ''}Analiza el perfil de puesto proporcionado y evalúa a los candidatos adjuntos. Determina quién es el más idóneo, justifica tu respuesta y proporciona un ranking.\n\n${contextualPrompt}`;
+    } else if (text && currentFiles.length > 0) {
+        finalMsg = `${text}\n\n${contextualPrompt}`;
+    } else if (!text && currentFiles.length > 0) {
+        finalMsg = `Analiza los siguientes documentos y proporciona un informe detallado:\n\n${contextualPrompt}`;
+    } else {
+        finalMsg = text;
+    }
+
+    currentParts.push({ text: finalMsg });
+
+    // Display bubble
+    const fileIcons = currentFiles.map(f => (f.category === 'profile' ? '🎯' : '📄') + f.name).join(', ');
+    const displayMsg = text + (fileIcons ? `\n📎 ${fileIcons}` : '');
+    appendMessage('user', displayMsg);
     chatHistory.push({ role: 'user', parts: currentParts });
 
-    // Reset input & file
+    // Reset UI
     userInput.value = '';
     userInput.style.height = 'auto';
     charCount.textContent = '0';
-    clearFile();
+    clearAllFiles();
     sendBtn.disabled = true;
     isLoading = true;
     setStatus('loading');
@@ -291,7 +360,7 @@ async function sendMessage() {
         typingEl.remove();
         appendMessage('model', response);
         chatHistory.push({ role: 'model', parts: [{ text: response }] });
-        saveCurrentSession(text || (currentFile ? currentFile.name : ''));
+        saveCurrentSession(text || (currentFiles[0]?.name || 'Chat'));
         setStatus('online');
     } catch (err) {
         typingEl.remove();
@@ -301,7 +370,7 @@ async function sendMessage() {
         showToast(errMsg, 'error');
     }
     isLoading = false;
-    sendBtn.disabled = userInput.value.trim().length === 0 && !attachedFile;
+    sendBtn.disabled = userInput.value.trim().length === 0 && attachedFiles.length === 0;
     chatArea.scrollTop = chatArea.scrollHeight;
 }
 
@@ -497,14 +566,14 @@ function startNewChat() {
     clearChatDOM();
     chatHistory = [];
     currentSessionId = null;
-    clearFile();
+    clearAllFiles();
     if (welcomeScreen) welcomeScreen.style.display = '';
 }
 
 function clearChat() {
     clearChatDOM();
     chatHistory = [];
-    clearFile();
+    clearAllFiles();
     if (welcomeScreen) welcomeScreen.style.display = '';
     showToast('Conversación limpiada', 'info');
 }

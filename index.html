@@ -155,25 +155,15 @@
             <div class="input-area" id="drop-zone">
                 <div class="input-container">
 
-                    <!-- Chip de archivo adjunto (visible solo cuando hay archivo) -->
-                    <div class="file-chip-row" id="file-chip-row" style="display:none">
-                        <div class="file-chip" id="file-chip">
-                            <span class="file-chip-icon" id="file-chip-icon">📄</span>
-                            <span class="file-chip-name" id="file-chip-name"></span>
-                            <span class="file-chip-size" id="file-chip-size"></span>
-                            <button class="file-chip-remove" id="file-chip-remove" title="Quitar archivo">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14"
-                                    height="14">
-                                    <line x1="18" y1="6" x2="6" y2="18" />
-                                    <line x1="6" y1="6" x2="18" y2="18" />
-                                </svg>
-                            </button>
-                        </div>
+                    <!-- Contenedor de archivos adjuntos (se puebla dinámicamente) -->
+                    <div class="file-chip-container" id="file-chip-container">
+                        <!-- Chips se inyectan por JS -->
                     </div>
 
                     <div class="input-box">
-                        <!-- Input oculto para seleccionar archivos -->
-                        <input type="file" id="file-input" accept=".pdf,.doc,.docx,.odt,.ott" style="display:none" />
+                        <!-- Input oculto para seleccionar archivos (múltiple) -->
+                        <input type="file" id="file-input" accept=".pdf,.doc,.docx,.odt,.ott" multiple
+                            style="display:none" />
                         <!-- Botón adjuntar archivo -->
                         <button id="attach-btn" class="attach-btn"
                             title="Adjuntar CV o documento (PDF, DOCX, ODT, DOC)">
