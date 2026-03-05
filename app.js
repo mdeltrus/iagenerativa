@@ -102,6 +102,17 @@ const dropOverlay = document.getElementById('drop-overlay');
             userInput.focus();
         });
     });
+
+    // Welcome Screen Feature Cards
+    document.querySelectorAll('.feature-card').forEach(card => {
+        card.addEventListener('click', () => {
+            if (card.dataset.prompt) {
+                userInput.value = card.dataset.prompt;
+                userInput.dispatchEvent(new Event('input'));
+                userInput.focus();
+            }
+        });
+    });
 })();
 
 // ─── API Key (solo desarrollo local) ───────────────────────────
